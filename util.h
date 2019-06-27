@@ -6,7 +6,7 @@
 typedef struct {
     char *value;
     size_t length;
-} token;
+} token_t;
 
 
 bool tokenize(char *str, int str_len, token_t *tokens, int *token_len);

@@ -1,12 +1,16 @@
-enum {
-    LOGLEVEL_DEBUG = 1,
-    LOGLEVEL_INFO,
-    LOGLEVEL_WARNING,
-    LOGLEVEL_ERROR
-}
+#ifndef __LOGGER_H__
+#define __LOGGER_H__
 
-int logger_level = LOGLEVEL_WARNING;
+typedef enum loglevel {
+    DEBUG = 1,
+    INFO,
+    WARN,
+    ERROR
+} LOGLEVEL;
+
+LOGLEVEL level;
 
 void init_logger(void);
 void set_loglevel(int loglevel);
-void pr_log(int loglevel, const char *fmt, ...);
+void plog(int loglevel, const char *fmt, ...);
+#endif
