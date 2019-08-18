@@ -2,9 +2,10 @@
 #define UTIL_H
 
 #include <sys/types.h>
+#include "types.h"
 
 typedef struct {
-    char *value;
+    char  *value;
     size_t length;
 } token_t;
 

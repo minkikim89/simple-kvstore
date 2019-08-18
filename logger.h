@@ -10,7 +10,7 @@ typedef enum loglevel {
 
 LOGLEVEL level;
 
-void init_logger(void);
-void set_loglevel(int loglevel);
-void plog(int loglevel, const char *fmt, ...);
+void logger_init(void);
+void set_loglevel(unsigned int loglevel);
+void plog(unsigned int loglevel, const char *fmt, ...);
 #endif

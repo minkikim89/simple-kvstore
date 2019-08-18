@@ -1,18 +1,21 @@
 #include <stdarg.h>
+#include <stdio.h>
 #include "logger.h"
 
-void init_logger()
+void logger_init()
 {
   level = WARN;
 }
 
-void set_loglevel(int loglevel)
+void set_loglevel(unsigned int loglevel)
 {
-
+  level = loglevel;
 }
 
-void plog(int loglevel, const char *fmt, ...)
+void plog(unsigned int loglevel, const char *fmt, ...)
 {
+  if (loglevel < level)
+    return;
   va_list strs;
   va_start(strs, fmt);
 

@@ -1,4 +1,5 @@
 *.o
 *.swp
+*.swn
 *.swo
 kv_server

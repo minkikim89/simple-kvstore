@@ -10,15 +10,15 @@
 #include <netinet/in.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <pthread.h>
 #include "server.h"
+#include "storage.h"
 #include "logger.h"
 #include "types.h"
-#include "worker.h"
 #include "util.h"
+#include "errno.h"
 
 #define EPOLL_SIZE      20
-
-//pthread_t worker_ids;
 
 #define MAX_BUFFER_SIZE 1024
 
@@ -45,6 +45,7 @@ static int setup_signal_handler()
   act.sa_handler = signal_shutdown_handler;
   sigaction(SIGTERM, &act, NULL);
   sigaction(SIGINT, &act, NULL);
+  return 0;
 }
 
 client* create_client(int fd)
@@ -64,28 +65,136 @@ client* create_client(int fd)
 }
 
 
-static int
-query_parse(char *query, int query_len)
+int reply(client *c, char *str, int slen)
 {
+  //TODO
+  char buf_in[258];
+  memcpy(buf_in, str, slen);
+  memcpy(buf_in+slen, "\r\n", 2);
+
+  write(c->fd, buf_in, slen+2);
+  return 0;
+}
+
+static int
+query_parse(client *c, char *query, int query_len)
+{
+  int ret;
   token_t tokens[3];
   int token_count;
   tokenize(query, query_len, tokens, &token_count);
 
   if (strcmp(tokens[COMMAND_TOKEN].value, "set") == 0) {
-    set_operation(tokens[KEY_TOKEN].value, tokens[KEY_TOKEN].length,
-                  tokens[VALUE_TOKEN].value, tokens[VALUE_TOKEN].length);
+    ret = set_operation(tokens[KEY_TOKEN], tokens[VALUE_TOKEN]);
+    if (ret == 0) {
+      reply(c, "OK", 2);
+    } else {
+      //TODO
+    }
   } else if (strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) {
-
+    token_t data_token;
+    ret = get_operation(tokens[KEY_TOKEN], &data_token);
+    if (ret == 0) {
+      reply(c, data_token.value, data_token.length);
+    } else {
+      //TODO
+    }
+  } else if (strcmp(tokens[COMMAND_TOKEN].value, "delete") == 0) {
+    ret = del_operation(tokens[KEY_TOKEN]);
+    if (ret == 0) {
+      reply(c, "OK", 2);
+    } else {
+      //TODO
+    }
   }
-
+  return 0;
 }
+
+/********************* worker ***********************/
+#define MAX_WORKER_NUM  1024
+
+typedef struct _worker {
+  client    *c;
+  pthread_t  tid;
+} worker;
+
+struct worker_global {
+  worker  worker_list[MAX_WORKER_NUM];
+  int     worker_count;
+};
+
+static struct worker_global worker_gl;
+
+//FIXME first.. it run as single thread..
+
+/*
+void assign_client_to_worker(client *c)
+{
+  
+}
+*/
+
+static void* worker_thread(void *arg)
+{
+  //TODO multi client support per thread
+  worker *w = (worker*)arg;
+  client *c = w->c;
+  int sfd = c->fd;
+  char *buff = c->querybuf;
+
+  //TODO dynaimic buffer
+  while (1) {
+    int rlen = read(sfd, buff, MAX_BUFFER_SIZE);
+    if (rlen <= 0) {
+      printf("rlen=%d",rlen);
+      close(sfd);
+      plog(WARN, "Close fd\n");
+      break;
+    } else {
+      char *tp = memchr(buff, '\n', rlen);
+      if (!tp) {
+        printf("not permitted command\n");
+        continue;
+      }
+      if (*(tp - 1) == '\r') tp--;
+      *tp = '\0';
+      int cmdlen = tp - buff;
+      query_parse(c, buff, cmdlen);
+    }
+  }
+  return 0;
+}
+
+int worker_start(client *c)
+{
+  worker *worker = &worker_gl.worker_list[worker_gl.worker_count++];
+  worker->c = c;
+
+  pthread_t tid;
+
+  int ret = pthread_create(&tid, NULL, worker_thread, worker);
+  if (ret != 0) {
+    plog(WARN, "Failed to create worker thread\n");
+    return -1;
+  }
+  worker->tid = tid;
+
+  return 0;
+}
+
+int worker_init()
+{
+  memset(&worker_gl, 0, sizeof(worker_gl));
+
+  return 0;
+}
+
 
 int main(int argc, char **argv)
 {
   int opt;
-  bool daemonize;
-  int thread_count;
-  bool shutdown_request = false;
+  //bool daemonize;
+  //int thread_count;
   int port = 12345;
   //    int tokenlen;
   //    token tokens[MAX_COMMAND_LEN];
@@ -100,10 +209,10 @@ int main(int argc, char **argv)
       case 'p':
         port = atoi(optarg);
       case 'd':
-        daemonize = true;
+        //daemonize = true;
         break;
       case 't':
-        thread_count = atoi(optarg);
+        //thread_count = atoi(optarg);
         break;
       case 'h':
         break;
@@ -111,14 +220,15 @@ int main(int argc, char **argv)
   }
 
   setup_signal_handler();
-  init_logger();
+  logger_init();
+  worker_init();
 
   struct epoll_event ev, *events;
 
   int epoll_fd;
-  int server_fd, client_fd;
+  int client_fd;
   struct sockaddr_in server_addr, client_addr;
-  int i, n, readn;
+  int i, n;
 
   events = (struct epoll_event *)malloc(sizeof(*events) * EPOLL_SIZE);
 
@@ -148,43 +258,33 @@ int main(int argc, char **argv)
 
   listen(server.fd, 5);
 
+  memset(&ev, 0, sizeof(struct epoll_event));
   ev.events = EPOLLIN;
   ev.data.fd = server.fd;
   epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server.fd, &ev);
 
-  while(!server.shutdown)
+  client *c;
+  while (!server.shutdown)
   {
     n = epoll_wait(epoll_fd, events, EPOLL_SIZE, -1);
-    if (n == -1 )
+    if (n == -1)
     {
-      perror("epoll wait error");
+      if (errno == EINTR) continue;
+      else perror("epoll_wait : ");;
     }
 
     for (i = 0; i < n; i++)
     {
       if (events[i].data.fd == server.fd) {
-        int clilen = sizeof(client_addr);
+        socklen_t clilen = sizeof(client_addr);
         client_fd = accept(server.fd, (struct sockaddr*)&client_addr, &clilen);
-        client *c = create_client(client_fd);
-        assign_client_to_worker(c);
-        ev.events = EPOLLIN;
-        ev.data.fd = client_fd;
-        epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
+        c = create_client(client_fd);
+        worker_start(c);
       } else {
-        char buf_in[256];
-        memset(buf_in, 0x00, 256);
-        readn = read(events[i].data.fd, buf_in, 255);
-        if (readn <= 0)
-        {
-          epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, events);
-          close(events[i].data.fd);
-          plog(WARN, "Close fd\n");
-        } else {
-          query_parse(buf_in, readn);
-        }
       }
     }
   }
+  free(events);
   close(server.fd);
 
   /*
@@ -195,4 +295,5 @@ int main(int argc, char **argv)
 
      worker_ids = worker_create(thr_ids, DEFAULT_THREAD_NUM);
      */
+  return 0;
 }
