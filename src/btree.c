@@ -1,10 +1,13 @@
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include "btree.h"
 #include "types.h"
 
 #define MAX_KEY_LEN 32
+
 #define MAX_ITEM_NUM 3
+#define MIN_ITEM_NUM (MAX_ITEM_NUM/2)
 
 /* optype */
 #define INSERT_OP 0
@@ -52,10 +55,11 @@ key_compare(char *key1, int key1_len, char *key2, int key2_len)
 
 /* internal btree node functions */
 static btree_node*
-alloc_internal_node()
+alloc_internal_node(void)
 {
   btree_node *node = malloc(sizeof(btree_node));
   memset(node, 0, sizeof(btree_node));
+  node->is_leaf = false;
   return node;
 }
 
@@ -72,8 +76,7 @@ static int lookup_internal_node(btree_node *node, char *key, int key_len)
   int cmp;
   int s, m, e;
 
-  s = 0;
-  m = 0;
+  s = 1;
   e = node->num_items - 1;
   while (s <= e) {
     m = (s + e) / 2;
@@ -101,6 +104,16 @@ static int insert_internal_node(btree_node *node, int index, char *key, int key_
   return 0;
 }
 
+static int update_internal_node(btree_node *node, int index, char *key, int key_len, void *ptr)
+{
+  btree_item *bitem = &node->items[index];
+  bitem->ptr = ptr;
+  bitem->nkey = key_len;
+  memset(&bitem->key, 0, sizeof(MAX_KEY_LEN));
+  memcpy(&bitem->key, key, key_len);
+  return 0;
+}
+
 static int delete_internal_node(btree_node *node, int index)
 {
   int i;
@@ -113,11 +126,19 @@ static int delete_internal_node(btree_node *node, int index)
 
 static int split_internal_node(btree_node *parent_node, char *key, int key_len, int index, btree_node **curr_node)
 {
+  bool new_root = false;
+  if (parent_node == NULL) {
+    new_root = true;
+    bt.root = alloc_internal_node();
+    parent_node = bt.root;
+  }
+
   btree_node *node = *curr_node;
   btree_node *new_node = alloc_internal_node();
 
   int i;
   int half_size = node->num_items/2;
+  half_size += node->num_items%2;
   int move_count = node->num_items - half_size;
 
   for (i = 0; i < move_count; i++) {
@@ -129,21 +150,25 @@ static int split_internal_node(btree_node *parent_node, char *key, int key_len, 
   char *next_key = new_node->items[0].key;
   int next_key_len = new_node->items[0].nkey;
 
-  insert_internal_node(parent_node, index, key, key_len, new_node);
+  if (new_root) {
+    assert(index == 0);
+    insert_internal_node(parent_node, index, NULL, 0, node);
+  }
+  insert_internal_node(parent_node, index+1, key, key_len, new_node);
   int cmp = key_compare(key, key_len, next_key, next_key_len);
   if (cmp >= 0) *curr_node = new_node;
   return 0;
 }
 
-static int merge_internal_node(btree_node *parent_node, int index, btree_node *curr_node)
+static int redistribute_internal_node(btree_node *parent_node, int curr_index, btree_node *curr_node)
 {
   int i;
   int sibling_index;
   btree_node *sibling_node;
 
-  if (index < parent_node->num_items - 1) {
+  if (curr_index < parent_node->num_items - 1) {
     /* merge with right node */
-    sibling_index = index + 1;
+    sibling_index = curr_index + 1;
     sibling_node = parent_node->items[sibling_index].ptr;
     if (curr_node->num_items + sibling_node->num_items < MAX_ITEM_NUM) {
       for (i = 0; i < sibling_node->num_items; i++) {
@@ -154,11 +179,20 @@ static int merge_internal_node(btree_node *parent_node, int index, btree_node *c
       delete_internal_node(parent_node, sibling_index);
       free_internal_node(sibling_node);
     } else {
-      //TODO
+      insert_internal_node(curr_node,
+                           curr_node->num_items,
+                           sibling_node->items[0].key,
+                           sibling_node->items[0].nkey,
+                           sibling_node->items[0].ptr);
+      delete_internal_node(sibling_node, 0);
+      update_internal_node(parent_node, sibling_index,
+                           sibling_node->items[0].key,
+                           sibling_node->items[0].nkey,
+                           sibling_node->items[0].ptr);
     }
   } else {
     /* merge with left node */
-    sibling_index = index - 1;
+    sibling_index = curr_index - 1;
     sibling_node = parent_node->items[sibling_index].ptr;
     if (curr_node->num_items + sibling_node->num_items < MAX_ITEM_NUM) {
       for (i = 0; i < curr_node->num_items; i++) {
@@ -166,17 +200,24 @@ static int merge_internal_node(btree_node *parent_node, int index, btree_node *c
       }
       sibling_node->num_items += curr_node->num_items;
       curr_node->num_items = 0;
-      delete_internal_node(parent_node, index);
+      delete_internal_node(parent_node, curr_index);
       free_internal_node(curr_node);
     } else {
-      //TODO
+      insert_internal_node(curr_node, 0,
+                           sibling_node->items[sibling_node->num_items-1].key,
+                           sibling_node->items[sibling_node->num_items-1].nkey,
+                           sibling_node->items[sibling_node->num_items-1].ptr);
+      delete_internal_node(sibling_node, sibling_node->num_items-1);
+      update_internal_node(parent_node, curr_index,
+                           curr_node->items[0].key,
+                           curr_node->items[0].nkey, curr_node->items[0].ptr);
     }
   }
   return 0;
 }
 
 static btree_node*
-alloc_leaf_node()
+alloc_leaf_node(void)
 {
   btree_node *node = malloc(sizeof(btree_node));
   memset(node, 0, sizeof(btree_node));
@@ -190,7 +231,6 @@ free_leaf_node(btree_node *node)
   free(node);
 }
 
-
 static int lookup_leaf_node(btree_node *node, char *key, int key_len)
 {
   assert(node->is_leaf);
@@ -199,7 +239,6 @@ static int lookup_leaf_node(btree_node *node, char *key, int key_len)
   int s, m, e;
 
   s = 0;
-  m = 0;
   e = node->num_items - 1;
   while (s <= e) {
     m = (s + e) / 2;
@@ -275,6 +314,7 @@ static int split_leaf_node(btree_node *parent_node, char *key, int key_len, int 
 
   int i;
   int half_size = node->num_items/2;
+  half_size += node->num_items%2;
   int move_count = node->num_items - half_size;
 
   for (i = 0; i < move_count; i++) {
@@ -287,6 +327,7 @@ static int split_leaf_node(btree_node *parent_node, char *key, int key_len, int 
   int next_key_len = new_node->items[0].nkey;
 
   if (new_root) {
+    assert(index == 0);
     insert_internal_node(parent_node, index, NULL, 0, node);
   }
   insert_internal_node(parent_node, index+1, next_key, next_key_len, new_node);
@@ -295,15 +336,15 @@ static int split_leaf_node(btree_node *parent_node, char *key, int key_len, int 
   return 0;
 }
 
-static int merge_leaf_node(btree_node *parent_node, int index, btree_node *curr_node)
+static int redistribute_leaf_node(btree_node *parent_node, int curr_index, btree_node *curr_node)
 {
   int i;
   int sibling_index;
   btree_node *sibling_node;
 
-  if (index < parent_node->num_items - 1) {
-    /* merge with right node */
-    sibling_index = index + 1;
+  if (curr_index < parent_node->num_items - 1) {
+    /* redistribute with right node */
+    sibling_index = curr_index + 1;
     sibling_node = parent_node->items[sibling_index].ptr;
     if (curr_node->num_items + sibling_node->num_items < MAX_ITEM_NUM) {
       for (i = 0; i < sibling_node->num_items; i++) {
@@ -311,14 +352,22 @@ static int merge_leaf_node(btree_node *parent_node, int index, btree_node *curr_
       }
       curr_node->num_items += sibling_node->num_items;
       sibling_node->num_items = 0;
-      delete_leaf_node(parent_node, sibling_index);
+      delete_internal_node(parent_node, sibling_index);
       free_leaf_node(sibling_node);
     } else {
-      //TODO
+      insert_leaf_node(curr_node,
+                       sibling_node->items[0].key,
+                       sibling_node->items[0].nkey,
+                       sibling_node->items[0].ptr);
+      delete_leaf_node(sibling_node, 0);
+      update_internal_node(parent_node, sibling_index,
+                           sibling_node->items[0].key,
+                           sibling_node->items[0].nkey,
+                           sibling_node->items[0].ptr);
     }
   } else {
-    /* merge with left node */
-    sibling_index = index - 1;
+    /* redistribute with left node */
+    sibling_index = curr_index - 1;
     sibling_node = parent_node->items[sibling_index].ptr;
     if (curr_node->num_items + sibling_node->num_items < MAX_ITEM_NUM) {
       for (i = 0; i < curr_node->num_items; i++) {
@@ -326,10 +375,17 @@ static int merge_leaf_node(btree_node *parent_node, int index, btree_node *curr_
       }
       sibling_node->num_items += curr_node->num_items;
       curr_node->num_items = 0;
-      delete_leaf_node(parent_node, index);
+      delete_internal_node(parent_node, curr_index);
       free_leaf_node(curr_node);
     } else {
-      //TODO
+      insert_leaf_node(curr_node,
+                       sibling_node->items[sibling_node->num_items-1].key,
+                       sibling_node->items[sibling_node->num_items-1].nkey,
+                       sibling_node->items[sibling_node->num_items-1].ptr);
+      delete_leaf_node(sibling_node, sibling_node->num_items-1);
+      update_internal_node(parent_node, curr_index,
+                           curr_node->items[0].key,
+                           curr_node->items[0].nkey, curr_node->items[0].ptr);
     }
   }
   return 0;
@@ -345,11 +401,12 @@ static btree_node *find_leaf_node(char *key, int key_len, int optype)
   btree_node *curr_node, *next_node;
   curr_node = bt.root;
   next_node = NULL;
-  if (curr_node->is_leaf) {
-    if (curr_node->num_items == MAX_ITEM_NUM) {
-        split_leaf_node(NULL, key, key_len, 0, &curr_node);
+  if (curr_node->num_items == MAX_ITEM_NUM) {
+    if (curr_node->is_leaf) {
+      split_leaf_node(NULL, key, key_len, 0, &curr_node);
+    } else {
+      split_internal_node(NULL, key, key_len, 0, &curr_node);
     }
-    return curr_node;
   }
 
   int index;
@@ -362,11 +419,11 @@ static btree_node *find_leaf_node(char *key, int key_len, int optype)
       } else {
         split_internal_node(curr_node, key, key_len, index, &next_node);
       }
-    } else if (optype == DELETE_OP && curr_node->num_items == 1) {
+    } else if (optype == DELETE_OP && next_node->num_items < MIN_ITEM_NUM) {
       if (next_node->is_leaf) {
-        merge_leaf_node(curr_node, index, next_node);
+        redistribute_leaf_node(curr_node, index, next_node);
       } else {
-        merge_internal_node(curr_node, index, next_node);
+        redistribute_internal_node(curr_node, index, next_node);
       }
     }
     curr_node = next_node;

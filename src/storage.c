@@ -48,8 +48,7 @@ int del_operation(token_t key_token)
   if (ret < 0) {
     return 0;
   }
-  //delete_index(key_token.value, key_token.length);
-  printf("delete ptr=%p\n", ptr);
+  delete_index(key_token.value, key_token.length);
   slot_free(ptr);
   return 0;
 }

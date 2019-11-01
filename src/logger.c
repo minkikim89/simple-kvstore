@@ -4,7 +4,7 @@
 
 void logger_init()
 {
-  level = WARN;
+  level = DEBUG;
 }
 
 void set_loglevel(unsigned int loglevel)

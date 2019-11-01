@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 500
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@
 #include "types.h"
 #include "util.h"
 #include "errno.h"
+#include "signal.h"
 
 #define EPOLL_SIZE      20
 
@@ -45,6 +47,13 @@ static int setup_signal_handler()
   act.sa_handler = signal_shutdown_handler;
   sigaction(SIGTERM, &act, NULL);
   sigaction(SIGINT, &act, NULL);
+  sigignore(SIGPIPE);
+  /*
+  if (sigignore(SIGPIPE) == -1) {
+    plog(WARN, "Failed to ignore SIGPIPE");
+    exit(0);
+  }
+  */
   return 0;
 }
 
@@ -65,14 +74,16 @@ client* create_client(int fd)
 }
 
 
-int reply(client *c, char *str, int slen)
+static int reply(client *c, char *str, int slen)
 {
   //TODO
   char buf_in[258];
   memcpy(buf_in, str, slen);
   memcpy(buf_in+slen, "\r\n", 2);
 
-  write(c->fd, buf_in, slen+2);
+  if (write(c->fd, buf_in, slen+2) <= 0) {
+    plog(WARN, "write failed\n");
+  }
   return 0;
 }
 
@@ -82,6 +93,7 @@ query_parse(client *c, char *query, int query_len)
   int ret;
   token_t tokens[3];
   int token_count;
+  plog(DEBUG, "query=%s\n", query);
   tokenize(query, query_len, tokens, &token_count);
 
   if (strcmp(tokens[COMMAND_TOKEN].value, "set") == 0) {
@@ -140,26 +152,48 @@ static void* worker_thread(void *arg)
   worker *w = (worker*)arg;
   client *c = w->c;
   int sfd = c->fd;
-  char *buff = c->querybuf;
+  char *lbuff;
+  char *now_buff;
+  int rbytes = 0, lbytes = MAX_BUFFER_SIZE;
+  int rrbytes = 0, llbytes = 0;
+  int readn;
 
-  //TODO dynaimic buffer
   while (1) {
-    int rlen = read(sfd, buff, MAX_BUFFER_SIZE);
-    if (rlen <= 0) {
-      printf("rlen=%d",rlen);
+    lbuff = c->querybuf + rbytes;
+    readn = read(sfd, lbuff, lbytes);
+    if (readn <= 0) {
       close(sfd);
-      plog(WARN, "Close fd\n");
+      plog(INFO, "Close fd\n");
       break;
     } else {
-      char *tp = memchr(buff, '\n', rlen);
-      if (!tp) {
-        printf("not permitted command\n");
-        continue;
+      rbytes += readn;
+      lbytes -= readn;
+      rrbytes = 0;
+      llbytes = readn;
+      while (1) {
+        now_buff = lbuff + rrbytes;
+        char *tp = memchr(now_buff, '\n', llbytes);
+        if (!tp) {
+          if (now_buff == c->querybuf) {
+            plog(WARN, "TOO long query..\n");
+            assert(false);
+          } else if (llbytes == 0) {
+            rbytes = 0;
+            lbytes = MAX_BUFFER_SIZE;
+          } else {
+            memmove(c->querybuf, now_buff, llbytes);
+            rbytes = llbytes;
+            lbytes = MAX_BUFFER_SIZE - llbytes;
+          }
+          break;
+        }
+        if (*(tp - 1) == '\r') tp--;
+        *tp = '\0';
+        int cmdlen = tp - now_buff;
+        query_parse(c, now_buff, cmdlen);
+        rrbytes += cmdlen+2;
+        llbytes -= cmdlen+2;
       }
-      if (*(tp - 1) == '\r') tp--;
-      *tp = '\0';
-      int cmdlen = tp - buff;
-      query_parse(c, buff, cmdlen);
     }
   }
   return 0;
@@ -178,7 +212,6 @@ int worker_start(client *c)
     return -1;
   }
   worker->tid = tid;
-
   return 0;
 }
 
@@ -270,7 +303,7 @@ int main(int argc, char **argv)
     if (n == -1)
     {
       if (errno == EINTR) continue;
-      else perror("epoll_wait : ");;
+      else perror("epoll_wait : ");
     }
 
     for (i = 0; i < n; i++)
